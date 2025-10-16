@@ -27,6 +27,7 @@ Thumbs.db
 # CSV exports or backups
 *.csv
 /backups/
+receipts/
 
 # Telegram bot data
 session*
