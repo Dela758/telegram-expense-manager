@@ -1,0 +1,38 @@
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.env
+.venv
+env/
+venv/
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Project Data (handled by volumes)
+data/
+receipts/
+charts/
+reports/
+csv_reports/
+*.db
+*.pkl
+
+# Local persistence
+C:/Users/HP/OneDrive/Desktop/Expense Tracker/data/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Documentation/Artifacts
+DOCUMENTATION.md
+Dockerfile
+.dockerignore
+implementation_plan*.md
+task.md
+walkthrough.md

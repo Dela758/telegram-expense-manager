@@ -13,6 +13,8 @@ env/
 .env
 config.json
 *.sqlite3
+*.db
+*.pkl
 
 # System files
 .DS_Store
@@ -24,10 +26,21 @@ Thumbs.db
 # Logs
 *.log
 
-# CSV exports or backups
+# Project Data and Exports
+data/
+receipts/
+charts/
+reports/
+csv_reports/
 *.csv
 /backups/
 receipts/
 
 # Telegram bot data
 session*
+
+# Agent Artifacts
+task.md
+walkthrough.md
+implementation_plan*.md
+DOCUMENTATION.md
