@@ -1,25 +1,33 @@
 from .database import db
 
-async def get_user_data(user_id):
-    """
-    Simulate the full user data dict for backward compatibility.
-    Updated to be async.
-    """
+async def get_user_profile(user_id):
+    """Fetch only the basic user settings (no expenses)."""
     user = await db.get_user(user_id)
-    if not user:
-        return None
-        
+    if not user: return None
     return {
         "user_id": user['user_id'],
         "pin": user['pin'],
         "currency": user['currency'],
         "budget": user['budget'],
         "email": user['email'],
-        "expenses": await db.get_expenses(user_id),
         "category_limits": await db.get_limits(user_id),
-        "recurring": await db.get_recurring(user_id),
-        "custom_categories": await db.get_custom_categories(user_id)
+        "custom_categories": await db.get_custom_categories(user_id),
+        "recurring": await db.get_subscriptions(user_id)
     }
+
+async def get_user_expenses(user_id, limit=None, offset=0):
+    """Fetch expenses with optional pagination."""
+    return await db.get_expenses(user_id, limit=limit, offset=offset)
+
+async def get_user_data(user_id):
+    """
+    Backward compatibility wrapper. 
+    WARNING: Avoid using for large datasets as it fetches ALL expenses.
+    """
+    profile = await get_user_profile(user_id)
+    if not profile: return None
+    profile["expenses"] = await get_user_expenses(user_id)
+    return profile
 
 async def save_user_data(user_id, data):
     """

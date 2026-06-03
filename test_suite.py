@@ -76,12 +76,36 @@ class TestExpenseTracker(unittest.TestCase):
     def test_05_custom_categories(self):
         """Test custom categories logic"""
         async def run():
-            db = ExpenseDB(self.test_db)
-            await db.init_db()
-            await db.add_custom_category(self.user_id, "gym")
-            categories = await db.get_custom_categories(self.user_id)
+            db_inst = ExpenseDB(self.test_db)
+            await db_inst.init_db()
+            await db_inst.add_custom_category(self.user_id, "gym")
+            categories = await db_inst.get_custom_categories(self.user_id)
             self.assertIn("gym", categories)
-            await db.delete_custom_category(self.user_id, "gym")
+            await db_inst.delete_custom_category(self.user_id, "gym")
+            
+        asyncio.run(run())
+
+    def test_06_storage_get_user_data(self):
+        """Test storage.get_user_data and verify it fetches subscriptions (recurring) successfully"""
+        from utils import storage
+        from utils.database import db
+        async def run():
+            # Point singleton db to test db path
+            db.db_path = self.test_db
+            await db.init_db()
+            
+            # Create user & subscription
+            await db.create_user(self.user_id, pin="1234")
+            await db.add_subscription(self.user_id, "Spotify", 9.99, "entertainment", "monthly")
+            
+            # Fetch user data via storage wrapper
+            data = await storage.get_user_data(self.user_id)
+            
+            # Verify data
+            self.assertIsNotNone(data)
+            self.assertTrue(db.verify_pin("1234", data["pin"]))
+            self.assertEqual(len(data["recurring"]), 1)
+            self.assertEqual(data["recurring"][0]["name"], "Spotify")
             
         asyncio.run(run())
 

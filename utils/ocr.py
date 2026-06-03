@@ -18,10 +18,10 @@ async def extract_receipt_data(image_path):
     client = AsyncGroq(api_key=api_key)
     base64_image = encode_image(image_path)
 
-    # Llama 4 Active Vision Models (verified Dec 2025)
+    # Stable Groq Vision Models
     models = [
-        "meta-llama/llama-4-scout-17b-16e-instruct",
-        "meta-llama/llama-4-maverick-17b-128e-instruct"
+        "llama-3.2-11b-vision-preview",
+        "llama-3.2-90b-vision-preview"
     ]
     
     for model in models:

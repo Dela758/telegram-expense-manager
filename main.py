@@ -1,6 +1,7 @@
 import logging
 import os
 import re
+import warnings
 from datetime import datetime
 from dotenv import load_dotenv
 
@@ -19,13 +20,23 @@ from utils.scheduler import schedule_jobs
 
 logging.basicConfig(level=logging.INFO)
 
+# Suppress PTB warning about CallbackQueryHandler with per_message=False.
+# This is intentional: the dashboard ConversationHandler tracks state per-user,
+# not per-message, which is the correct behaviour for this bot.
+warnings.filterwarnings(
+    "ignore",
+    message=".*per_message=False.*CallbackQueryHandler.*",
+    category=UserWarning,
+)
+
 # Conversation states
 (
-    ASK_PIN, VERIFY_PIN, ADD_EXPENSE, ADD_RECUR, 
+    ASK_PIN, VERIFY_PIN, ADD_EXPENSE,  
     SET_LIMIT, SET_BUDGET, SET_EMAIL, ASK_CURRENCY, 
     ASK_EMAIL, EDIT_EXPENSE_AMT, EDIT_EXPENSE_CAT, 
-    ADD_CATEGORY_NAME
-) = range(12)
+    ADD_CATEGORY_NAME, ADD_SUB_NAME, ADD_SUB_AMT, 
+    ADD_SUB_CAT, ADD_SUB_CYCLE
+) = range(15)
 
 # -------------------- START / PIN --------------------
 
@@ -94,12 +105,12 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("📊 Summary & Breakdown", callback_data='menu_summary')],
         [InlineKeyboardButton("📈 View Charts", callback_data='menu_charts'),
          InlineKeyboardButton("🔮 Forecast", callback_data='menu_forecast')],
-        [InlineKeyboardButton("⏳ Recurring", callback_data='menu_recurring'),
-         InlineKeyboardButton("🎯 Set Limit", callback_data='menu_limit')],
-        [InlineKeyboardButton("💰 Set Budget", callback_data='menu_budget'),
-         InlineKeyboardButton("📧 Export", callback_data='menu_export')],
-        [InlineKeyboardButton("⚙️ Settings", callback_data='menu_settings'),
-         InlineKeyboardButton("📖 Help Guide", callback_data='menu_help')],
+        [InlineKeyboardButton("💳 Subscriptions", callback_data='menu_subs')],
+        [InlineKeyboardButton("🎯 Set Limit", callback_data='menu_limit'),
+         InlineKeyboardButton("💰 Set Budget", callback_data='menu_budget')],
+        [InlineKeyboardButton("📧 Export", callback_data='menu_export'),
+         InlineKeyboardButton("⚙️ Settings", callback_data='menu_settings')],
+        [InlineKeyboardButton("📖 Help Guide", callback_data='menu_help')],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     msg = "💰 *MAIN MENU* 💰\n\nWhat would you like to do?"
@@ -171,36 +182,21 @@ async def add_expense(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             amount = converted_amt
 
+    # Smart Categorization Fallback
+    category = parsed['category']
+    if category == 'misc' or not category:
+        from utils.ai_categorizer import get_smart_category
+        category = await get_smart_category(user_id, parsed.get('description', ''), text)
+
     # Direct DB Persistence
     await db.add_expense(
         user_id=user_id,
         amount=amount,
-        category=parsed['category'],
+        category=category,
         note=parsed.get('description')
     )
     
-    await update.message.reply_text(f"💰 Added `{amount:.2f}` {base_currency} for {parsed['category']}", parse_mode="Markdown")
-
-async def set_recurring(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.callback_query:
-        await update.callback_query.answer()
-    if not context.user_data.get('authorized'):
-        await update.effective_message.reply_text("🔐 Please /start and enter your PIN first.")
-        return ConversationHandler.END
-    await update.effective_message.reply_text("Send recurring expense like: 'Netflix 100'")
-    return ADD_RECUR
-
-async def save_recurring(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    parsed = parser.parse_expense_message(update.message.text)
-    if not parsed:
-        await update.message.reply_text("Couldn’t parse. Try again.")
-        raise ApplicationHandlerStop()
-        return
-    user_id = update.effective_user.id
-    await db.add_recurring(user_id, parsed['amount'], parsed['category'])
-    await update.message.reply_text("✅ Recurring expense saved.")
-    raise ApplicationHandlerStop()
-    return ConversationHandler.END
+    await update.message.reply_text(f"💰 Added `{amount:.2f}` {base_currency} for {category}", parse_mode="Markdown")
 
 async def set_limit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.callback_query:
@@ -208,24 +204,25 @@ async def set_limit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.user_data.get('authorized'):
         await update.effective_message.reply_text("🔐 Please /start and enter your PIN first.")
         return ConversationHandler.END
-    await update.effective_message.reply_text("Send category limit like 'food 500'")
+    await update.effective_message.reply_text("🎯 Enter category and limit (e.g., 'food 500'):")
     return SET_LIMIT
 
 async def save_limit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        cat, amt = update.message.text.split()
-        amt = float(amt)
+        parts = update.message.text.split()
+        if len(parts) < 2: raise ValueError()
+        cat, amt = parts[0], float(parts[1])
     except:
-        await update.message.reply_text("Format: category amount (e.g., food 500)")
+        await update.message.reply_text("❌ Format: category amount (e.g., food 500)")
         raise ApplicationHandlerStop()
         return
+    
     user_id = update.effective_user.id
-    user_data = await storage.get_user_data(user_id)
-    limits = user_data.get("category_limits", {})
-    limits[cat.lower()] = amt
-    user_data["category_limits"] = limits
-    await storage.save_user_data(user_id, user_data)
-    await update.message.reply_text(f"✅ Limit set: {cat} → {amt} {user_data['currency']}")
+    user_row = await db.get_user(user_id)
+    currency = user_row['currency'] if user_row else "USD"
+    
+    await db.set_limit(user_id, cat, amt)
+    await update.message.reply_text(f"✅ Limit set: {cat.capitalize()} → {amt:.2f} {currency}")
     raise ApplicationHandlerStop()
     return ConversationHandler.END
 
@@ -235,7 +232,7 @@ async def set_budget(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.user_data.get('authorized'):
         await update.effective_message.reply_text("🔐 Please /start and enter your PIN first.")
         return ConversationHandler.END
-    await update.effective_message.reply_text("Enter your monthly budget (e.g., 2000):")
+    await update.effective_message.reply_text("💰 Enter your total monthly budget amount:")
     return SET_BUDGET
 
 async def save_budget(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -246,10 +243,11 @@ async def save_budget(update: Update, context: ContextTypes.DEFAULT_TYPE):
         raise ApplicationHandlerStop()
         return SET_BUDGET
     user_id = update.effective_user.id
-    user_data = await storage.get_user_data(user_id)
-    user_data["budget"] = budget
-    await storage.save_user_data(user_id, user_data)
-    await update.message.reply_text(f"✅ Monthly budget set to {budget} {user_data['currency']}")
+    user_row = await db.get_user(user_id)
+    currency = user_row['currency'] if user_row else "USD"
+    
+    await db.update_user(user_id, budget=budget)
+    await update.message.reply_text(f"✅ Monthly budget set to {budget:.2f} {currency}")
     raise ApplicationHandlerStop()
     return ConversationHandler.END
 
@@ -259,20 +257,21 @@ async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     try:
         user_id = update.effective_user.id
-        user_data = await storage.get_user_data(user_id)
-        if not user_data:
+        expenses = await db.get_expenses(user_id)
+        user_row = await db.get_user(user_id)
+        
+        if not user_row:
             await update.effective_message.reply_text("❌ User data not found. Please /start.")
             return
 
-        expenses = user_data.get("expenses", [])
-        currency = user_data.get("currency", "USD")
+        currency = user_row['currency']
         
         if not expenses:
             msg = "📭 No expenses recorded yet."
             if update.callback_query:
                 await update.callback_query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Menu", callback_data='back_to_main')]]))
             else:
-                await update.message.reply_text(msg)
+                await update.effective_message.reply_text(msg)
             return
             
         today = datetime.now().date()
@@ -302,7 +301,7 @@ async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 res += f"• {cat.capitalize()}: `{amt:.2f}`\n"
         
         # Budget info
-        budget = user_data.get("budget", 0)
+        budget = user_row['budget']
         if budget > 0:
             # Calculate monthly total
             this_month = today.replace(day=1)
@@ -412,6 +411,14 @@ async def export_csv(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for item in expenses:
             writer.writerow(item)
 
+        # Add Active Subscriptions Summary
+        subs = await db.get_subscriptions(user_id)
+        if subs:
+            output.write("\n--- ACTIVE SUBSCRIPTIONS ---\n")
+            output.write("Name,Amount,Category,Cycle,Start Date\n")
+            for s in subs:
+                output.write(f"{s['name']},{s['amount']},{s['category']},{s['billing_cycle']},{s['start_date']}\n")
+
         output.seek(0)
         await update.effective_message.reply_document(
             document=output.getvalue().encode(), 
@@ -447,10 +454,17 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await file.download_to_drive(path)
     
     # AI Extraction
-    data = await ocr.extract_receipt_data(path)
+    try:
+        data = await ocr.extract_receipt_data(path)
+    finally:
+        if os.path.exists(path):
+            try:
+                os.remove(path)
+            except Exception as e:
+                logging.error(f"Error removing temp receipt file {path}: {e}")
     
     if not data or 'amount' not in data:
-        await status_msg.edit_text("❌ AI could not extract data. Receipt saved for manual entry.")
+        await status_msg.edit_text("❌ AI could not extract data. Receipt photo has been cleaned up.")
         return
 
     amount = data.get('amount', 0)
@@ -519,10 +533,17 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await file.download_to_drive(path)
     
     # AI Extraction
-    data = await voice_processor.process_voice_note(path)
+    try:
+        data = await voice_processor.process_voice_note(path)
+    finally:
+        if os.path.exists(path):
+            try:
+                os.remove(path)
+            except Exception as e:
+                logging.error(f"Error removing temp voice file {path}: {e}")
     
     if not data or 'amount' not in data:
-        await status_msg.edit_text("❌ AI could not understand the expense details in your voice note.")
+        await status_msg.edit_text("❌ AI could not understand the expense details in your voice note. Audio has been cleaned up.")
         return
 
     amount = data.get('amount', 0)
@@ -600,34 +621,137 @@ async def settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(msg, reply_markup=reply_markup, parse_mode="Markdown")
 
 async def settings_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        query = update.callback_query
+        await query.answer()
+        logging.info(f"Settings callback: {query.data}")
+
+        if query.data == 'settings_pin':
+            await query.edit_message_text("🔐 Send new 4-digit PIN:")
+            return ASK_PIN
+        elif query.data == 'settings_currency':
+            await query.edit_message_text("💱 Enter 3-letter currency code (e.g., USD, EUR, GHS):")
+            return ASK_CURRENCY
+        elif query.data == 'settings_email':
+            await query.edit_message_text("📧 Enter your email address:")
+            return ASK_EMAIL
+        elif query.data == 'settings_categories':
+            await manage_categories(update, context)
+            return ConversationHandler.END
+        elif query.data == 'cat_add':
+            await query.edit_message_text("📂 Enter name for new category:")
+            return ADD_CATEGORY_NAME
+        elif query.data.startswith('cat_del_'):
+            cat_name = query.data.replace('cat_del_', '')
+            await db.delete_custom_category(update.effective_user.id, cat_name)
+            await query.answer(f"✅ Category '{cat_name}' deleted")
+            await manage_categories(update, context)
+            return ConversationHandler.END
+        elif query.data == 'back_to_main':
+            await show_main_menu(update, context)
+            return ConversationHandler.END
+        return ConversationHandler.END
+    except Exception as e:
+        logging.error(f"Error in settings_callback_handler: {e}", exc_info=True)
+        if query: await query.answer("❌ Error in settings.")
+        return ConversationHandler.END
+
+# -------------------- SUBSCRIPTIONS --------------------
+
+async def subscriptions_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    
+    user_id = update.effective_user.id
+    subs = await db.get_subscriptions(user_id)
+    
+    msg = "💳 *SUBSCRIPTION MANAGEMENT*\n━━━━━━━━━━━━━━━\n"
+    if not subs:
+        msg += "No active subscriptions found."
+    else:
+        total_monthly = 0
+        for s in subs:
+            amount = s['amount']
+            if s['billing_cycle'] == 'yearly':
+                amount /= 12
+            total_monthly += amount
+            msg += f"• *{s['name']}*: `{s['amount']:.2f}` ({s['billing_cycle']})\n"
+        
+        msg += f"\n💰 *Est. Monthly Cost:* `{total_monthly:.2f}`"
+
+    keyboard = [
+        [InlineKeyboardButton("➕ Add Subscription", callback_data='sub_add')],
+        [InlineKeyboardButton("⬅️ Back to Menu", callback_data='back_to_main')]
+    ]
+    
+    for s in subs:
+        keyboard.insert(-1, [InlineKeyboardButton(f"🗑️ Delete '{s['name']}'", callback_data=f"sub_del_{s['id']}")])
+
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    if query:
+        await query.edit_message_text(msg, reply_markup=reply_markup, parse_mode="Markdown")
+    else:
+        await update.message.reply_text(msg, reply_markup=reply_markup, parse_mode="Markdown")
+    return ConversationHandler.END
+
+async def sub_add_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.edit_message_text("📝 Enter the name of the subscription (e.g., Netflix):")
+    return ADD_SUB_NAME
+
+async def sub_add_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data['temp_sub'] = {'name': update.message.text.strip()}
+    await update.message.reply_text("💰 Enter the amount:")
+    return ADD_SUB_AMT
+
+async def sub_add_amt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        amt = float(update.message.text.strip())
+        context.user_data['temp_sub']['amount'] = amt
+    except:
+        await update.message.reply_text("❌ Invalid amount. Try again:")
+        return ADD_SUB_AMT
+    
+    # Use AI to guess category based on name
+    from utils.ai_categorizer import get_smart_category
+    guessed_cat = await get_smart_category(update.effective_user.id, context.user_data['temp_sub']['name'])
+    context.user_data['temp_sub']['category'] = guessed_cat
+    
+    keyboard = [
+        [InlineKeyboardButton("📅 Monthly", callback_data='cycle_monthly'),
+         InlineKeyboardButton("📆 Yearly", callback_data='cycle_yearly')]
+    ]
+    await update.message.reply_text(
+        f"🔄 Select billing cycle (AI guessed category: *{guessed_cat}*):",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown"
+    )
+    return ADD_SUB_CYCLE
+
+async def sub_add_cycle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    logging.info(f"Settings callback: {query.data}")
+    
+    cycle = 'monthly' if query.data == 'cycle_monthly' else 'yearly'
+    sub_data = context.user_data.get('temp_sub')
+    
+    await db.add_subscription(
+        user_id=update.effective_user.id,
+        name=sub_data['name'],
+        amount=sub_data['amount'],
+        category=sub_data['category'],
+        billing_cycle=cycle
+    )
+    
+    await query.edit_message_text(f"✅ Subscription '{sub_data['name']}' added!")
+    del context.user_data['temp_sub']
+    await subscriptions_menu(update, context)
+    return ConversationHandler.END
 
-    if query.data == 'settings_pin':
-        await query.edit_message_text("🔐 Send new 4-digit PIN:")
-        return ASK_PIN
-    elif query.data == 'settings_currency':
-        await query.edit_message_text("💱 Enter 3-letter currency code (e.g., USD, EUR, GHS):")
-        return ASK_CURRENCY
-    elif query.data == 'settings_email':
-        await query.edit_message_text("📧 Enter your email address:")
-        return ASK_EMAIL
-    elif query.data == 'settings_categories':
-        await manage_categories(update, context)
-        return ConversationHandler.END
-    elif query.data == 'cat_add':
-        await query.edit_message_text("📂 Enter name for new category:")
-        return ADD_CATEGORY_NAME
-    elif query.data.startswith('cat_del_'):
-        cat_name = query.data.replace('cat_del_', '')
-        await db.delete_custom_category(update.effective_user.id, cat_name)
-        await query.answer(f"✅ Category '{cat_name}' deleted")
-        await manage_categories(update, context)
-        return ConversationHandler.END
-    elif query.data == 'back_to_main':
-        await show_main_menu(update, context)
-        return ConversationHandler.END
+async def sub_delete_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    sub_id = int(query.data.replace('sub_del_', ''))
+    await db.delete_subscription(sub_id, update.effective_user.id)
+    await query.answer("✅ Subscription deleted")
+    await subscriptions_menu(update, context)
     return ConversationHandler.END
 
 async def main_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -646,6 +770,14 @@ async def main_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return await export_menu(update, context)
         elif query.data == 'menu_help':
             return await help_command(update, context)
+        elif query.data == 'menu_settings':
+            return await settings(update, context)
+        elif query.data == 'menu_limit':
+            return await set_limit(update, context)
+        elif query.data == 'menu_budget':
+            return await set_budget(update, context)
+        elif query.data == 'menu_charts':
+            return await send_charts(update, context)
         elif query.data == 'export_pdf':
             return await export_pdf_handler(update, context)
         elif query.data == 'export_csv_action':
@@ -665,8 +797,14 @@ async def main_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data['edit_expense_id'] = expense_id
             await query.edit_message_text("✏️ Enter new amount:")
             return EDIT_EXPENSE_AMT
-        elif query.data == 'menu_charts':
-            return await send_charts(update, context)
+        elif query.data == 'menu_subs':
+            return await subscriptions_menu(update, context)
+        elif query.data == 'sub_add':
+            return await sub_add_start(update, context)
+        elif query.data == 'back_to_main':
+            return await show_main_menu(update, context)
+        elif query.data.startswith('sub_del_'):
+            return await sub_delete_handler(update, context)
         else:
             logging.warning(f"Unhandled callback in main_menu_handler: {query.data}")
             return ConversationHandler.END
@@ -694,22 +832,33 @@ async def export_pdf_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
         
     await query.message.reply_text("📄 Generating detailed PDF report...")
+    pdf_path = None
     try:
         month_name = datetime.now().strftime("%B %Y")
-        path = pdf_generator.generate_pdf_report(
-            user_id=user_id, 
-            expenses=expenses, 
-            currency=user_row['currency'], 
+        # Fetch active subscriptions to include in the report
+        subscriptions = await db.get_subscriptions(user_id)
+        
+        pdf_path = pdf_generator.generate_pdf_report(
+            user_id=user_id,
+            expenses=expenses,
+            currency=user_row['currency'],
             month_name=month_name,
             budget=user_row['budget'],
-            limits=limits
+            limits=limits,
+            subscriptions=subscriptions
         )
         
-        with open(path, 'rb') as f:
-            await update.effective_message.reply_document(document=f, filename=os.path.basename(path))
+        with open(pdf_path, 'rb') as f:
+            await update.effective_message.reply_document(document=f, filename=os.path.basename(pdf_path))
     except Exception as e:
         logging.error(f"Failed to generate PDF: {e}", exc_info=True)
         await query.message.reply_text(f"❌ Failed to generate PDF report: {e}")
+    finally:
+        if pdf_path and os.path.exists(pdf_path):
+            try:
+                os.remove(pdf_path)
+            except Exception as e:
+                logging.error(f"Error removing generated PDF report {pdf_path}: {e}")
 
 async def export_csv_action_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -794,14 +943,21 @@ async def manage_categories(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def show_forecast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.user_data.get('authorized'):
         await update.effective_message.reply_text("🔐 Please /start and enter your PIN first.")
-        return
+        return ConversationHandler.END
+    
     query = update.callback_query
     user_id = update.effective_user.id
-    user_data = await storage.get_user_data(user_id)
-    res = forecaster.forecast_monthly_spend(user_data['expenses'], user_data['budget'])
+    expenses = await db.get_expenses(user_id)
+    user_row = await db.get_user(user_id)
+    budget = user_row['budget'] if user_row else 0
+    
+    res = forecaster.forecast_monthly_spend(expenses, budget)
     
     keyboard = [[InlineKeyboardButton("⬅️ Back", callback_data='back_to_main')]]
-    await query.edit_message_text(res, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+    if query:
+        await query.edit_message_text(res, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+    else:
+        await update.effective_message.reply_text(res, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
     return ConversationHandler.END
 
 async def export_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -811,7 +967,10 @@ async def export_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("📊 Export CSV (Raw)", callback_data='export_csv_action')],
         [InlineKeyboardButton("⬅️ Back", callback_data='back_to_main')]
     ]
-    await query.edit_message_text("📧 *SELECT EXPORT FORMAT*", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+    if query:
+        await query.edit_message_text("📧 *SELECT EXPORT FORMAT*", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+    else:
+        await update.effective_message.reply_text("📧 *SELECT EXPORT FORMAT*", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
     return ConversationHandler.END
 
 async def send_charts(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -820,27 +979,53 @@ async def send_charts(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     query = update.callback_query
     user_id = update.effective_user.id
-    user_data = await storage.get_user_data(user_id)
-    expenses = user_data.get("expenses", [])
+    expenses = await db.get_expenses(user_id)
+    user_row = await db.get_user(user_id)
+    currency = user_row['currency'] if user_row else "USD"
     
     if not expenses:
-        await query.message.reply_text("📭 No data for charts yet.")
+        msg = "📭 No data for charts yet."
+        if query:
+            await query.message.reply_text(msg)
+        else:
+            await update.effective_message.reply_text(msg)
         return
         
-    await query.message.reply_text("📊 Generating your charts...")
-    pie, bar = visualizer.generate_spending_charts(user_id, expenses, user_data.get("currency", "USD"))
+    status_msg = await update.effective_message.reply_text("📊 Generating your charts...")
+    pie, bar = visualizer.generate_spending_charts(user_id, expenses, currency)
     
     from telegram import InputMediaPhoto
     media = []
-    if pie and os.path.exists(pie):
-        media.append(InputMediaPhoto(open(pie, 'rb')))
-    if bar and os.path.exists(bar):
-        media.append(InputMediaPhoto(open(bar, 'rb')))
-        
-    if media:
-        await query.message.reply_media_group(media=media)
-    else:
+    files_to_close = []
+    try:
+        if pie and os.path.exists(pie):
+            f_pie = open(pie, 'rb')
+            files_to_close.append(f_pie)
+            media.append(InputMediaPhoto(f_pie))
+        if bar and os.path.exists(bar):
+            f_bar = open(bar, 'rb')
+            files_to_close.append(f_bar)
+            media.append(InputMediaPhoto(f_bar))
+            
+        if media:
+            await query.message.reply_media_group(media=media)
+        else:
+            await query.message.reply_text("❌ Failed to generate charts.")
+    except Exception as e:
+        logging.error(f"Failed to send charts: {e}", exc_info=True)
         await query.message.reply_text("❌ Failed to generate charts.")
+    finally:
+        for f in files_to_close:
+            try:
+                f.close()
+            except:
+                pass
+        for path in [pie, bar]:
+            if path and os.path.exists(path):
+                try:
+                    os.remove(path)
+                except Exception as e:
+                    logging.error(f"Error removing chart file {path}: {e}")
     return ConversationHandler.END
     
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -854,7 +1039,6 @@ This bot helps you track your expenses using text, voice, and photos.
 🔹 `/add` <exp> - Quick add (e.g., `/add 50 coffee`)
 🔹 `/summary` - View today's spending breakdown
 🔹 `/upload` - Start receipt scanning photo mode
-🔹 `/recurring` - Manage your automated bills
 🔹 `/limit` - Set spending limits for categories
 🔹 `/setbudget` - Define your total monthly budget
 🔹 `/export` - Download data as CSV
@@ -893,42 +1077,36 @@ async def received_pin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     pin = update.message.text.strip()
     if not pin.isdigit() or len(pin) != 4:
         await update.message.reply_text("❌ Invalid PIN. Enter 4 digits:")
-        raise ApplicationHandlerStop()
         return ASK_PIN
     user_id = update.effective_user.id
     user_data = await storage.get_user_data(user_id) or {}
     user_data["pin"] = pin
     await storage.save_user_data(user_id, user_data)
     await update.message.reply_text("✅ PIN updated.")
-    raise ApplicationHandlerStop()
     return ConversationHandler.END
 
 async def received_currency(update: Update, context: ContextTypes.DEFAULT_TYPE):
     currency = update.message.text.strip().upper()
     if not re.fullmatch(r"[A-Z]{3}", currency):
         await update.message.reply_text("❌ Invalid currency. Enter a 3-letter code:")
-        raise ApplicationHandlerStop()
         return ASK_CURRENCY
     user_id = update.effective_user.id
     user_data = await storage.get_user_data(user_id) or {}
     user_data["currency"] = currency
     await storage.save_user_data(user_id, user_data)
     await update.message.reply_text(f"✅ Currency updated to {currency}.")
-    raise ApplicationHandlerStop()
     return ConversationHandler.END
 
 async def received_email(update: Update, context: ContextTypes.DEFAULT_TYPE):
     email = update.message.text.strip()
     if "@" not in email or "." not in email:
         await update.message.reply_text("❌ Invalid email. Enter again:")
-        raise ApplicationHandlerStop()
         return ASK_EMAIL
     user_id = update.effective_user.id
     user_data = await storage.get_user_data(user_id) or {}
     user_data["email"] = email
     await storage.save_user_data(user_id, user_data)
     await update.message.reply_text(f"✅ Email updated to {email}.")
-    raise ApplicationHandlerStop()
     return ConversationHandler.END
 
 async def edit_amt_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -936,7 +1114,6 @@ async def edit_amt_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         new_amt = float(update.message.text.strip())
     except:
         await update.message.reply_text("❌ Invalid amount. Enter a number:")
-        raise ApplicationHandlerStop()
         return EDIT_EXPENSE_AMT
     
     expense_id = context.user_data.get('edit_expense_id')
@@ -949,14 +1126,12 @@ async def edit_amt_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Error: No expense selected for editing.")
     
     await show_main_menu(update, context)
-    raise ApplicationHandlerStop()
     return ConversationHandler.END
 
 async def add_category_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     name = update.message.text.strip().lower()
     if not name or len(name) > 20:
         await update.message.reply_text("❌ Invalid name. Keep it under 20 characters:")
-        raise ApplicationHandlerStop()
         return ADD_CATEGORY_NAME
     
     success = await db.add_custom_category(update.effective_user.id, name)
@@ -966,7 +1141,6 @@ async def add_category_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text(f"❌ Category '{name}' already exists.")
     
     await manage_categories(update, context)
-    raise ApplicationHandlerStop()
     return ConversationHandler.END
 
 # -------------------- MAIN --------------------
@@ -974,13 +1148,26 @@ async def add_category_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 async def post_init(application):
     await db.init_db()
 
-load_dotenv()
 if __name__ == "__main__":
+    load_dotenv()
+    
+    bot_token = os.getenv("BOT_TOKEN")
+    if not bot_token:
+        import sys
+        logging.critical("BOT_TOKEN is not set in the environment or .env file. Exiting.")
+        sys.exit(1)
+        
+    if not os.getenv("GROQ_API_KEY"):
+        logging.warning("GROQ_API_KEY is not set. Vision OCR scanning and Voice processing features will not work.")
+        
+    if not os.getenv("EMAIL_ADDRESS") or not os.getenv("EMAIL_PASSWORD"):
+        logging.warning("EMAIL_ADDRESS or EMAIL_PASSWORD is not set. Scheduled monthly email reports will fail.")
+
     os.makedirs("data", exist_ok=True)
     persistence = PicklePersistence(filepath="data/persistence.pkl")
     
     app = ApplicationBuilder() \
-        .token(os.getenv("BOT_TOKEN")) \
+        .token(bot_token) \
         .persistence(persistence) \
         .post_init(post_init) \
         .build()
@@ -999,27 +1186,19 @@ if __name__ == "__main__":
     dashboard_conv = ConversationHandler(
         entry_points=[
             CommandHandler("settings", settings),
-            CommandHandler("recurring", set_recurring),
             CommandHandler("limit", set_limit),
             CommandHandler("setbudget", set_budget),
             CommandHandler("setemail", set_email),
             CallbackQueryHandler(settings, pattern="^menu_settings$"),
-            CallbackQueryHandler(set_recurring, pattern="^menu_recurring$"),
             CallbackQueryHandler(set_limit, pattern="^menu_limit$"),
             CallbackQueryHandler(set_budget, pattern="^menu_budget$"),
             CallbackQueryHandler(upload_command, pattern="^menu_upload$"),
+            CallbackQueryHandler(subscriptions_menu, pattern="^menu_subs$"),
             CallbackQueryHandler(summary, pattern="^menu_summary$"),
-            CallbackQueryHandler(show_history, pattern="^menu_history$"),
-            CallbackQueryHandler(show_forecast, pattern="^menu_forecast$"),
-            CallbackQueryHandler(export_menu, pattern="^menu_export$"),
-            CallbackQueryHandler(send_charts, pattern="^menu_charts$"),
-            CallbackQueryHandler(menu_add_handler, pattern="^menu_add$"), 
-            CallbackQueryHandler(set_email, pattern="^settings_email$"), 
-            CallbackQueryHandler(settings_callback_handler, pattern=re.compile(r"^(settings_|back_to_main|cat_add|cat_del_)")),
-            CallbackQueryHandler(main_menu_handler, pattern=re.compile(r"^(menu_|del_|export_|editamt_|hist_page_)"))
+            CallbackQueryHandler(sub_delete_handler, pattern="^sub_del_"),
+            CallbackQueryHandler(main_menu_handler, pattern=re.compile(r"^(menu_|del_|export_|editamt_|hist_page_|sub_|back_)"))
         ],
         states={
-            ADD_RECUR: [MessageHandler(filters.TEXT & ~filters.COMMAND, save_recurring)],
             SET_LIMIT: [MessageHandler(filters.TEXT & ~filters.COMMAND, save_limit)],
             SET_BUDGET: [MessageHandler(filters.TEXT & ~filters.COMMAND, save_budget)],
             SET_EMAIL: [MessageHandler(filters.TEXT & ~filters.COMMAND, save_email)],
@@ -1028,11 +1207,15 @@ if __name__ == "__main__":
             ASK_PIN: [MessageHandler(filters.TEXT & ~filters.COMMAND, received_pin)],
             ADD_CATEGORY_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_category_handler)],
             EDIT_EXPENSE_AMT: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_amt_handler)],
+            ADD_SUB_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, sub_add_name)],
+            ADD_SUB_AMT: [MessageHandler(filters.TEXT & ~filters.COMMAND, sub_add_amt)],
+            ADD_SUB_CYCLE: [CallbackQueryHandler(sub_add_cycle, pattern="^cycle_")],
         },
         fallbacks=[CommandHandler("cancel", lambda u, c: ConversationHandler.END)],
         name="dashboard_conversation",
         persistent=True,
         allow_reentry=True,
+        per_message=False,
     )
 
     # Register handlers
@@ -1042,8 +1225,8 @@ if __name__ == "__main__":
     # Callback queries for main menu (single actions)
     app.add_handler(CallbackQueryHandler(ocr_callback_handler, pattern=re.compile(r"^ocr_")))
     app.add_handler(CallbackQueryHandler(voice_callback_handler, pattern=re.compile(r"^voice_")))
-    app.add_handler(CallbackQueryHandler(main_menu_handler, pattern=re.compile(r"^(menu_|del_|export_)")))
-    app.add_handler(CallbackQueryHandler(settings_callback_handler, pattern=re.compile(r"^back_to_main$")))
+    app.add_handler(CallbackQueryHandler(main_menu_handler, pattern=re.compile(r"^(menu_|del_|export_|editamt_|hist_page_|sub_|back_)")))
+    app.add_handler(CallbackQueryHandler(settings_callback_handler, pattern=re.compile(r"^(settings_|cat_add|cat_del_)")))
     
     app.add_handler(CommandHandler("add", add_expense))
     app.add_handler(CommandHandler("summary", summary))
@@ -1054,8 +1237,8 @@ if __name__ == "__main__":
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice))
     
-    # Group 1: Catch-all for expenses
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, add_expense), group=1)
+    # Catch-all for expenses (Run last in Group 0)
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, add_expense))
 
     # Start background jobs
     schedule_jobs(app.bot)

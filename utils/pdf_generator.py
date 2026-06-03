@@ -2,8 +2,21 @@ from fpdf import FPDF
 import os
 from datetime import datetime
 
-# Path to a Unicode-compatible font (standard on Windows)
-FONT_PATH = r"C:\Windows\Fonts\arial.ttf"
+# Common font paths for portability (Windows and Linux)
+FONT_PATHS = [
+    r"C:\Windows\Fonts\arial.ttf",
+    "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+    "/usr/share/fonts/TTF/DejaVuSans.ttf",
+    "assets/fonts/arial.ttf" # Local project fallback
+]
+
+def get_available_font():
+    for path in FONT_PATHS:
+        if os.path.exists(path):
+            return path
+    return None
+
+FONT_PATH = get_available_font()
 
 class ReportPDF(FPDF):
     def __init__(self, **kwargs):
@@ -35,15 +48,15 @@ def sanitize_text(text, font_available=False):
         return str(text)
     return str(text).encode('latin-1', 'replace').decode('latin-1')
 
-def generate_pdf_report(user_id, expenses, currency, month_name, budget=0, limits=None):
+def generate_pdf_report(user_id, expenses, currency, month_name, budget=0, limits=None, subscriptions=None):
     try:
-        return _create_pdf_report(user_id, expenses, currency, month_name, budget, limits)
+        return _create_pdf_report(user_id, expenses, currency, month_name, budget, limits, subscriptions=subscriptions)
     except Exception as e:
         # Emergency Fallback: If Unicode/Arial fails, force everything to plain ASCII/Latin-1
         print(f"[PDF] Error during high-fidelity generation: {e}. Falling back to emergency mode.")
-        return _create_pdf_report(user_id, expenses, currency, month_name, budget, limits, force_ascii=True)
+        return _create_pdf_report(user_id, expenses, currency, month_name, budget, limits, force_ascii=True, subscriptions=subscriptions)
 
-def _create_pdf_report(user_id, expenses, currency, month_name, budget=0, limits=None, force_ascii=False):
+def _create_pdf_report(user_id, expenses, currency, month_name, budget=0, limits=None, force_ascii=False, subscriptions=None):
     pdf = ReportPDF()
     # If font is missing OR we are in emergency fallback mode, use Helvetica
     has_font = pdf.main_font == "ArialUnicode" and not force_ascii
@@ -68,6 +81,18 @@ def _create_pdf_report(user_id, expenses, currency, month_name, budget=0, limits
         pdf.cell(0, 10, f'Remaining: {(budget - total_spent):.2f} {currency}', new_x="LMARGIN", new_y="NEXT")
     
     pdf.ln(5)
+
+    if subscriptions:
+        pdf.set_font(pdf.main_font, 'B', 12)
+        pdf.cell(0, 10, 'Active Subscriptions Summary:', new_x="LMARGIN", new_y="NEXT")
+        pdf.set_font(pdf.main_font, '', 11)
+        
+        bullet = "•" if has_font else "-"
+        for s in subscriptions:
+            name = sanitize_text(s['name'], has_font)
+            cycle = sanitize_text(s['billing_cycle'], has_font)
+            pdf.cell(0, 8, f'{bullet} {name}: {s["amount"]:.2f} {currency} ({cycle})', new_x="LMARGIN", new_y="NEXT")
+        pdf.ln(5)
 
     if limits:
         pdf.set_font(pdf.main_font, 'B', 12)
@@ -104,6 +129,7 @@ def _create_pdf_report(user_id, expenses, currency, month_name, budget=0, limits
         
         pdf.cell(40, 10, date, border=1)
         pdf.cell(50, 10, cat, border=1)
+        # Handle long notes by clipping or using multi_cell if needed (keeping it simple for now)
         pdf.cell(100, 10, note, border=1, new_x="LMARGIN", new_y="NEXT")
         
     pdf.ln(5)

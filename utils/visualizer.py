@@ -1,9 +1,6 @@
-import matplotlib.pyplot as plt
+from matplotlib.figure import Figure
 import os
 from datetime import datetime
-
-# Set up a clean style
-plt.style.use('ggplot')
 
 def generate_spending_charts(user_id, expenses, currency="USD"):
     if not expenses:
@@ -28,15 +25,14 @@ def generate_spending_charts(user_id, expenses, currency="USD"):
             
     pie_path = None
     if monthly_breakdown:
-        plt.figure(figsize=(8, 6))
-        plt.pie(monthly_breakdown.values(), labels=monthly_breakdown.keys(), autopct='%1.1f%%', startangle=140)
-        plt.title(f"Monthly Spending Breakdown ({currency})")
+        fig = Figure(figsize=(8, 6))
+        ax = fig.subplots()
+        ax.pie(monthly_breakdown.values(), labels=monthly_breakdown.keys(), autopct='%1.1f%%', startangle=140)
+        ax.set_title(f"Monthly Spending Breakdown ({currency})")
         pie_path = os.path.join(charts_dir, f"{user_id}_pie.png")
-        plt.savefig(pie_path)
-        plt.close()
+        fig.savefig(pie_path)
         
     # 2. Weekly Bar Chart (Last 7 days)
-    import pandas as pd
     from datetime import timedelta
     
     last_7_days = today - timedelta(days=6)
@@ -50,18 +46,19 @@ def generate_spending_charts(user_id, expenses, currency="USD"):
         except:
             continue
             
-    plt.figure(figsize=(10, 5))
+    fig = Figure(figsize=(10, 5))
+    ax = fig.subplots()
     dates = list(daily_data.keys())
     dates.reverse()
     values = [daily_data[d] for d in dates]
     
-    plt.bar([d[-5:] for d in dates], values, color='skyblue')
-    plt.title(f"Spending over last 7 days ({currency})")
-    plt.ylabel("Amount")
-    plt.xlabel("Date")
+    ax.bar([d[-5:] for d in dates], values, color='skyblue')
+    ax.set_title(f"Spending over last 7 days ({currency})")
+    ax.set_ylabel("Amount")
+    ax.set_xlabel("Date")
     
     bar_path = os.path.join(charts_dir, f"{user_id}_bar.png")
-    plt.savefig(bar_path)
-    plt.close()
+    fig.savefig(bar_path)
     
     return pie_path, bar_path
+
