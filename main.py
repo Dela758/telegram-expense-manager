@@ -18,6 +18,14 @@ from utils import storage, parser, currency, visualizer, forecaster, pdf_generat
 from utils.database import db
 from utils.scheduler import schedule_jobs
 
+async def send_menu(query, text, reply_markup=None, parse_mode="Markdown"):
+    """Delete the old menu message and send a fresh one at the bottom of the chat."""
+    try:
+        await query.message.delete()
+    except Exception:
+        pass  # If delete fails (e.g. already gone), just continue
+    await query.message.chat.send_message(text, reply_markup=reply_markup, parse_mode=parse_mode)
+
 def is_premium_active(user_data):
     if not user_data:
         return False
@@ -139,7 +147,7 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = "💰 *MAIN MENU* 💰\n\nWhat would you like to do?"
     if update.callback_query:
         await update.callback_query.answer()
-        await update.callback_query.edit_message_text(msg, reply_markup=reply_markup, parse_mode="Markdown")
+        await send_menu(update.callback_query, msg, reply_markup=reply_markup)
     else:
         await update.message.reply_text(msg, reply_markup=reply_markup, parse_mode="Markdown")
     return ConversationHandler.END
@@ -306,7 +314,7 @@ async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not expenses:
             msg = "📭 No expenses recorded yet."
             if update.callback_query:
-                await update.callback_query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Menu", callback_data='back_to_main')]]))
+                await send_menu(update.callback_query, msg, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Menu", callback_data='back_to_main')]]), parse_mode=None)
             else:
                 await update.effective_message.reply_text(msg)
             return
@@ -364,7 +372,7 @@ async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup = InlineKeyboardMarkup(keyboard)
 
         if update.callback_query:
-            await update.callback_query.edit_message_text(res, reply_markup=reply_markup, parse_mode="Markdown")
+            await send_menu(update.callback_query, res, reply_markup=reply_markup)
         else:
             await update.message.reply_text(res, reply_markup=reply_markup, parse_mode="Markdown")
         return ConversationHandler.END
@@ -696,7 +704,7 @@ async def settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = "⚙️ *SETTINGS MENU*"
     
     if update.callback_query:
-        await update.callback_query.edit_message_text(msg, reply_markup=reply_markup, parse_mode="Markdown")
+        await send_menu(update.callback_query, msg, reply_markup=reply_markup)
     else:
         await update.message.reply_text(msg, reply_markup=reply_markup, parse_mode="Markdown")
 
@@ -768,7 +776,7 @@ async def subscriptions_menu(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     reply_markup = InlineKeyboardMarkup(keyboard)
     if query:
-        await query.edit_message_text(msg, reply_markup=reply_markup, parse_mode="Markdown")
+        await send_menu(query, msg, reply_markup=reply_markup)
     else:
         await update.message.reply_text(msg, reply_markup=reply_markup, parse_mode="Markdown")
     return ConversationHandler.END
@@ -1018,7 +1026,7 @@ async def manage_categories(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     reply_markup = InlineKeyboardMarkup(keyboard)
     if update.callback_query:
-        await update.callback_query.edit_message_text(res, reply_markup=reply_markup, parse_mode="Markdown")
+        await send_menu(update.callback_query, res, reply_markup=reply_markup)
     else:
         await update.message.reply_text(res, reply_markup=reply_markup, parse_mode="Markdown")
 
@@ -1037,7 +1045,7 @@ async def show_forecast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     keyboard = [[InlineKeyboardButton("⬅️ Back", callback_data='back_to_main')]]
     if query:
-        await query.edit_message_text(res, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+        await send_menu(query, res, reply_markup=InlineKeyboardMarkup(keyboard))
     else:
         await update.effective_message.reply_text(res, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
     return ConversationHandler.END
@@ -1050,7 +1058,7 @@ async def export_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("⬅️ Back", callback_data='back_to_main')]
     ]
     if query:
-        await query.edit_message_text("📧 *SELECT EXPORT FORMAT*", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+        await send_menu(query, "📧 *SELECT EXPORT FORMAT*", reply_markup=InlineKeyboardMarkup(keyboard))
     else:
         await update.effective_message.reply_text("📧 *SELECT EXPORT FORMAT*", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
     return ConversationHandler.END
@@ -1151,7 +1159,7 @@ Need more help? Just start typing an expense!
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     if update.callback_query:
-        await update.callback_query.edit_message_text(help_text, reply_markup=reply_markup, parse_mode="Markdown")
+        await send_menu(update.callback_query, help_text, reply_markup=reply_markup)
     else:
         await update.message.reply_text(help_text, reply_markup=reply_markup, parse_mode="Markdown")
 
@@ -1275,7 +1283,7 @@ async def show_premium_hub(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if query:
         await query.answer()
-        await query.edit_message_text(msg, reply_markup=reply_markup, parse_mode="Markdown")
+        await send_menu(query, msg, reply_markup=reply_markup)
     else:
         await update.effective_message.reply_text(msg, reply_markup=reply_markup, parse_mode="Markdown")
 
@@ -1319,6 +1327,7 @@ async def send_invoice_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             title=product["title"],
             description=product["description"],
             payload=product["payload"],
+            provider_token="",  # Required parameter, must be empty string for Telegram Stars (XTR)
             currency="XTR",  # Telegram Stars currency code
             prices=[LabeledPrice(label=product["title"], amount=product["price"])],
         )
