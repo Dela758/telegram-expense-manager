@@ -1,7 +1,7 @@
 import aiosqlite
 import os
 import bcrypt
-from datetime import datetime
+from datetime import datetime, timedelta
 import logging
 
 DB_PATH = os.environ.get("EXPENSE_DB_PATH", "data/expenses.db")
@@ -30,9 +30,23 @@ class ExpenseDB:
                     pin TEXT,
                     currency TEXT DEFAULT 'USD',
                     budget REAL DEFAULT 0,
-                    email TEXT
+                    email TEXT,
+                    subscription_tier TEXT DEFAULT 'free',
+                    premium_until TEXT,
+                    ai_credits INTEGER DEFAULT 5
                 )
             """)
+            
+            # Check for existing columns to migrate dynamically
+            cursor = await conn.execute("PRAGMA table_info(users)")
+            columns = [row[1] for row in await cursor.fetchall()]
+            if 'subscription_tier' not in columns:
+                await conn.execute("ALTER TABLE users ADD COLUMN subscription_tier TEXT DEFAULT 'free'")
+            if 'premium_until' not in columns:
+                await conn.execute("ALTER TABLE users ADD COLUMN premium_until TEXT")
+            if 'ai_credits' not in columns:
+                await conn.execute("ALTER TABLE users ADD COLUMN ai_credits INTEGER DEFAULT 5")
+
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS expenses (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -237,5 +251,62 @@ class ExpenseDB:
             await self._init_conn(conn)
             await conn.execute("DELETE FROM subscriptions WHERE id = ? AND user_id = ?", (sub_id, user_id))
             await conn.commit()
+
+    async def upgrade_user_to_premium(self, user_id, days):
+        user = await self.get_user(user_id)
+        if not user:
+            return
+        
+        now = datetime.now()
+        current_until = user['premium_until']
+        
+        if current_until:
+            try:
+                base_date = datetime.fromisoformat(current_until)
+                if base_date < now:
+                    base_date = now
+            except ValueError:
+                base_date = now
+        else:
+            base_date = now
+            
+        new_until = (base_date + timedelta(days=days)).isoformat()
+        
+        async with self._get_conn() as conn:
+            await self._init_conn(conn)
+            await conn.execute(
+                "UPDATE users SET subscription_tier = 'premium', premium_until = ? WHERE user_id = ?",
+                (new_until, user_id)
+            )
+            await conn.commit()
+
+    async def add_ai_credits(self, user_id, amount):
+        async with self._get_conn() as conn:
+            await self._init_conn(conn)
+            await conn.execute(
+                "UPDATE users SET ai_credits = ai_credits + ? WHERE user_id = ?",
+                (amount, user_id)
+            )
+            await conn.commit()
+
+    async def use_ai_credit(self, user_id):
+        async with self._get_conn() as conn:
+            await self._init_conn(conn)
+            await conn.execute(
+                "UPDATE users SET ai_credits = MAX(0, ai_credits - 1) WHERE user_id = ?",
+                (user_id,)
+            )
+            await conn.commit()
+
+    async def get_monthly_expense_count(self, user_id):
+        month_start = datetime.now().replace(day=1, hour=0, minute=0, second=0, microsecond=0).isoformat()
+        async with self._get_conn() as conn:
+            await self._init_conn(conn)
+            cursor = await conn.execute(
+                "SELECT COUNT(*) FROM expenses WHERE user_id = ? AND date >= ?",
+                (user_id, month_start)
+            )
+            row = await cursor.fetchone()
+            return row[0] if row else 0
 
 db = ExpenseDB()

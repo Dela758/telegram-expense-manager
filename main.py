@@ -11,12 +11,34 @@ from telegram import (
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler,
     filters, ContextTypes, ConversationHandler, CallbackQueryHandler,
-    PicklePersistence, ApplicationHandlerStop
+    PicklePersistence, ApplicationHandlerStop, PreCheckoutQueryHandler
 )
 
 from utils import storage, parser, currency, visualizer, forecaster, pdf_generator, ocr, voice_processor
 from utils.database import db
 from utils.scheduler import schedule_jobs
+
+def is_premium_active(user_data):
+    if not user_data:
+        return False
+    if user_data.get("subscription_tier") != "premium":
+        return False
+    premium_until = user_data.get("premium_until")
+    if not premium_until:
+        return False
+    try:
+        until_date = datetime.fromisoformat(premium_until)
+        return until_date > datetime.now()
+    except ValueError:
+        return False
+
+def get_premium_upgrade_keyboard():
+    keyboard = [
+        [InlineKeyboardButton("⭐ Buy Premium (1 Month) - 150 Stars", callback_data='buy_premium_1m')],
+        [InlineKeyboardButton("📸 Buy 50 AI Credits - 50 Stars", callback_data='buy_credits_50')],
+        [InlineKeyboardButton("⬅️ Back to Menu", callback_data='back_to_main')]
+    ]
+    return InlineKeyboardMarkup(keyboard)
 
 logging.basicConfig(level=logging.INFO)
 
@@ -110,6 +132,7 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
          InlineKeyboardButton("💰 Set Budget", callback_data='menu_budget')],
         [InlineKeyboardButton("📧 Export", callback_data='menu_export'),
          InlineKeyboardButton("⚙️ Settings", callback_data='menu_settings')],
+        [InlineKeyboardButton("⭐ Premium Hub", callback_data='menu_premium')],
         [InlineKeyboardButton("📖 Help Guide", callback_data='menu_help')],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -169,6 +192,20 @@ async def add_expense(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user_data = await storage.get_user_data(user_id)
     base_currency = user_data.get("currency", "USD")
+
+    # --- Free Tier Quota Check ---
+    if not is_premium_active(user_data):
+        monthly_count = await db.get_monthly_expense_count(user_id)
+        FREE_MONTHLY_LIMIT = 30
+        if monthly_count >= FREE_MONTHLY_LIMIT:
+            await update.message.reply_text(
+                f"🚫 *Free Tier Limit Reached!*\n\n"
+                f"You've logged *{monthly_count}/{FREE_MONTHLY_LIMIT}* expenses this month.\n\n"
+                f"Upgrade to *⭐ Premium* for unlimited tracking!",
+                parse_mode="Markdown",
+                reply_markup=get_premium_upgrade_keyboard()
+            )
+            raise ApplicationHandlerStop()
     
     amount = parsed["amount"]
     symbol = parsed.get("symbol")
@@ -444,7 +481,21 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message.photo:
         await update.message.reply_text("❗ No photo received.")
         return
-    
+
+    # --- AI Credit Check ---
+    user_data = await storage.get_user_data(user_id)
+    if not is_premium_active(user_data):
+        credits = user_data.get("ai_credits", 0) if user_data else 0
+        if credits <= 0:
+            await update.message.reply_text(
+                "📸 *AI Receipt Scanning Unavailable*\n\n"
+                "You've used all your free AI scan credits.\n"
+                "Buy more credits or upgrade to *⭐ Premium* for unlimited scans!",
+                parse_mode="Markdown",
+                reply_markup=get_premium_upgrade_keyboard()
+            )
+            return
+
     status_msg = await update.message.reply_text("🔍 *Scanning receipt with AI...*", parse_mode="Markdown")
     
     photo = update.message.photo[-1]
@@ -466,6 +517,10 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not data or 'amount' not in data:
         await status_msg.edit_text("❌ AI could not extract data. Receipt photo has been cleaned up.")
         return
+
+    # Deduct credit for successful extraction
+    if not is_premium_active(user_data):
+        await db.use_ai_credit(user_id)
 
     amount = data.get('amount', 0)
     category = data.get('category', 'misc')
@@ -522,6 +577,20 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message.voice:
         await update.message.reply_text("❗ No voice message received.")
         return
+
+    # --- AI Credit Check ---
+    user_data = await storage.get_user_data(user_id)
+    if not is_premium_active(user_data):
+        credits = user_data.get("ai_credits", 0) if user_data else 0
+        if credits <= 0:
+            await update.message.reply_text(
+                "🎙️ *AI Voice Logging Unavailable*\n\n"
+                "You've used all your free AI voice credits.\n"
+                "Buy more credits or upgrade to *⭐ Premium* for unlimited voice logging!",
+                parse_mode="Markdown",
+                reply_markup=get_premium_upgrade_keyboard()
+            )
+            return
     
     status_msg = await update.message.reply_text("🎙️ *Transcribing & parsing voice note...*", parse_mode="Markdown")
     
@@ -545,6 +614,10 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not data or 'amount' not in data:
         await status_msg.edit_text("❌ AI could not understand the expense details in your voice note. Audio has been cleaned up.")
         return
+
+    # Deduct credit for successful transcription
+    if not is_premium_active(user_data):
+        await db.use_ai_credit(user_id)
 
     amount = data.get('amount', 0)
     category = data.get('category', 'misc')
@@ -803,6 +876,8 @@ async def main_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return await sub_add_start(update, context)
         elif query.data == 'back_to_main':
             return await show_main_menu(update, context)
+        elif query.data == 'menu_premium':
+            return await show_premium_hub(update, context)
         elif query.data.startswith('sub_del_'):
             return await sub_delete_handler(update, context)
         else:
@@ -1143,6 +1218,153 @@ async def add_category_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     await manage_categories(update, context)
     return ConversationHandler.END
 
+# -------------------- PREMIUM HUB --------------------
+
+async def show_premium_hub(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Display Premium Hub with current tier status and purchase options."""
+    if not context.user_data.get('authorized'):
+        await update.effective_message.reply_text("🔐 Please /start and enter your PIN first.")
+        return
+    
+    user_id = update.effective_user.id
+    user_data = await storage.get_user_data(user_id)
+    query = update.callback_query
+
+    if is_premium_active(user_data):
+        until_str = user_data.get("premium_until", "")
+        try:
+            until_date = datetime.fromisoformat(until_str).strftime("%d %b %Y")
+        except:
+            until_date = "Unknown"
+        tier_badge = f"⭐ *PREMIUM*\nActive until: `{until_date}`"
+    else:
+        monthly_count = await db.get_monthly_expense_count(user_id)
+        credits = user_data.get("ai_credits", 0) if user_data else 0
+        tier_badge = (
+            f"🆓 *FREE TIER*\n"
+            f"• Transactions this month: `{monthly_count}/30`\n"
+            f"• AI Credits remaining: `{credits}`"
+        )
+
+    msg = (
+        f"⭐ *PREMIUM HUB*\n"
+        f"━━━━━━━━━━━━━━━\n"
+        f"{tier_badge}\n\n"
+        f"*Unlock with Premium:*\n"
+        f"✅ Unlimited expense logging\n"
+        f"✅ Unlimited AI receipt scanning\n"
+        f"✅ Unlimited AI voice logging\n"
+        f"✅ Professional PDF reports\n"
+        f"✅ Unlimited category limits"
+    )
+
+    keyboard = [
+        [InlineKeyboardButton("⭐ Premium — 1 Month (150 Stars)", callback_data='buy_premium_1m')],
+        [InlineKeyboardButton("⭐ Premium — 3 Months (400 Stars)", callback_data='buy_premium_3m')],
+        [InlineKeyboardButton("📸 AI Credits Pack — 50 credits (50 Stars)", callback_data='buy_credits_50')],
+        [InlineKeyboardButton("⬅️ Back to Menu", callback_data='back_to_main')]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    if query:
+        await query.answer()
+        await query.edit_message_text(msg, reply_markup=reply_markup, parse_mode="Markdown")
+    else:
+        await update.effective_message.reply_text(msg, reply_markup=reply_markup, parse_mode="Markdown")
+
+
+async def send_invoice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle purchase button taps by sending a Telegram Stars invoice."""
+    query = update.callback_query
+    await query.answer()
+    user_id = update.effective_user.id
+
+    PRODUCTS = {
+        'buy_premium_1m': {
+            "title": "⭐ Premium — 1 Month",
+            "description": "Unlimited expense logging, AI scans, voice notes and reports for 30 days.",
+            "payload": "premium_30_days",
+            "price": 150,
+        },
+        'buy_premium_3m': {
+            "title": "⭐ Premium — 3 Months",
+            "description": "Unlimited expense logging, AI scans, voice notes and reports for 90 days.",
+            "payload": "premium_90_days",
+            "price": 400,
+        },
+        'buy_credits_50': {
+            "title": "📸 AI Credits Pack — 50 Credits",
+            "description": "50 AI credits for receipt scanning and voice logging.",
+            "payload": "credits_50",
+            "price": 50,
+        },
+    }
+
+    product = PRODUCTS.get(query.data)
+    if not product:
+        await query.answer("❌ Unknown product.", show_alert=True)
+        return
+
+    try:
+        from telegram import LabeledPrice
+        await context.bot.send_invoice(
+            chat_id=user_id,
+            title=product["title"],
+            description=product["description"],
+            payload=product["payload"],
+            currency="XTR",  # Telegram Stars currency code
+            prices=[LabeledPrice(label=product["title"], amount=product["price"])],
+        )
+    except Exception as e:
+        logging.error(f"Error sending invoice: {e}", exc_info=True)
+        await query.message.reply_text("❌ Failed to create invoice. Please try again later.")
+
+
+async def pre_checkout_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Approve all pre-checkout queries (validate server-side if needed)."""
+    query = update.pre_checkout_query
+    valid_payloads = {"premium_30_days", "premium_90_days", "credits_50"}
+    if query.invoice_payload in valid_payloads:
+        await query.answer(ok=True)
+    else:
+        await query.answer(ok=False, error_message="Unknown product. Please try again.")
+
+
+async def successful_payment_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle completed Telegram Stars payments and grant the purchased product."""
+    payment = update.message.successful_payment
+    payload = payment.invoice_payload
+    user_id = update.effective_user.id
+
+    logging.info(f"Successful payment from user {user_id}: payload={payload}, stars={payment.total_amount}")
+
+    if payload == "premium_30_days":
+        await db.upgrade_user_to_premium(user_id, days=30)
+        await update.message.reply_text(
+            "🎉 *Welcome to Premium!* ⭐\n\n"
+            "Your account has been upgraded for *30 days*.\n"
+            "Enjoy unlimited expense logging, AI scanning, and professional reports!",
+            parse_mode="Markdown"
+        )
+    elif payload == "premium_90_days":
+        await db.upgrade_user_to_premium(user_id, days=90)
+        await update.message.reply_text(
+            "🎉 *Welcome to Premium!* ⭐\n\n"
+            "Your account has been upgraded for *90 days*.\n"
+            "Enjoy unlimited expense logging, AI scanning, and professional reports!",
+            parse_mode="Markdown"
+        )
+    elif payload == "credits_50":
+        await db.add_ai_credits(user_id, 50)
+        await update.message.reply_text(
+            "✅ *50 AI Credits Added!* 📸\n\n"
+            "You can now scan 50 more receipts or voice notes using AI.",
+            parse_mode="Markdown"
+        )
+    else:
+        logging.warning(f"Unknown payment payload received: {payload}")
+        await update.message.reply_text("✅ Payment received. If you have issues, contact support.")
+
 # -------------------- MAIN --------------------
 
 async def post_init(application):
@@ -1225,6 +1447,7 @@ if __name__ == "__main__":
     # Callback queries for main menu (single actions)
     app.add_handler(CallbackQueryHandler(ocr_callback_handler, pattern=re.compile(r"^ocr_")))
     app.add_handler(CallbackQueryHandler(voice_callback_handler, pattern=re.compile(r"^voice_")))
+    app.add_handler(CallbackQueryHandler(send_invoice_handler, pattern=re.compile(r"^buy_")))
     app.add_handler(CallbackQueryHandler(main_menu_handler, pattern=re.compile(r"^(menu_|del_|export_|editamt_|hist_page_|sub_|back_)")))
     app.add_handler(CallbackQueryHandler(settings_callback_handler, pattern=re.compile(r"^(settings_|cat_add|cat_del_)")))
     
@@ -1234,6 +1457,12 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("export", export_csv))
     app.add_handler(CommandHandler("menu", show_main_menu))
     app.add_handler(CommandHandler("help", help_command))
+    app.add_handler(CommandHandler("premium", show_premium_hub))
+
+    # Telegram Stars payment handlers
+    app.add_handler(PreCheckoutQueryHandler(pre_checkout_handler))
+    app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment_handler))
+
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice))
     

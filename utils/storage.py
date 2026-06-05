@@ -10,6 +10,9 @@ async def get_user_profile(user_id):
         "currency": user['currency'],
         "budget": user['budget'],
         "email": user['email'],
+        "subscription_tier": user['subscription_tier'],
+        "premium_until": user['premium_until'],
+        "ai_credits": user['ai_credits'],
         "category_limits": await db.get_limits(user_id),
         "custom_categories": await db.get_custom_categories(user_id),
         "recurring": await db.get_subscriptions(user_id)
