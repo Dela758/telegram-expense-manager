@@ -473,6 +473,19 @@ async def upload_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.user_data.get('authorized'):
         await update.effective_message.reply_text("🔐 Please /start and enter your PIN first.")
         return ConversationHandler.END
+
+    # --- Premium Gate ---
+    user_id = update.effective_user.id
+    user_data = await storage.get_user_data(user_id)
+    if not is_premium_active(user_data):
+        await update.effective_message.reply_text(
+            "📸 *AI Receipt Scanning is a Premium Feature*\n\n"
+            "Upgrade to *⭐ Premium* to unlock unlimited AI receipt scanning!",
+            parse_mode="Markdown",
+            reply_markup=get_premium_upgrade_keyboard()
+        )
+        return ConversationHandler.END
+
     await update.effective_message.reply_text("📸 Please send the receipt photo now.")
     return ConversationHandler.END
 
@@ -482,19 +495,16 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❗ No photo received.")
         return
 
-    # --- AI Credit Check ---
+    # --- Premium Gate ---
     user_data = await storage.get_user_data(user_id)
     if not is_premium_active(user_data):
-        credits = user_data.get("ai_credits", 0) if user_data else 0
-        if credits <= 0:
-            await update.message.reply_text(
-                "📸 *AI Receipt Scanning Unavailable*\n\n"
-                "You've used all your free AI scan credits.\n"
-                "Buy more credits or upgrade to *⭐ Premium* for unlimited scans!",
-                parse_mode="Markdown",
-                reply_markup=get_premium_upgrade_keyboard()
-            )
-            return
+        await update.message.reply_text(
+            "📸 *AI Receipt Scanning is a Premium Feature*\n\n"
+            "Upgrade to *⭐ Premium* to unlock unlimited AI receipt scanning!",
+            parse_mode="Markdown",
+            reply_markup=get_premium_upgrade_keyboard()
+        )
+        return
 
     status_msg = await update.message.reply_text("🔍 *Scanning receipt with AI...*", parse_mode="Markdown")
     
@@ -518,9 +528,6 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await status_msg.edit_text("❌ AI could not extract data. Receipt photo has been cleaned up.")
         return
 
-    # Deduct credit for successful extraction
-    if not is_premium_active(user_data):
-        await db.use_ai_credit(user_id)
 
     amount = data.get('amount', 0)
     category = data.get('category', 'misc')
@@ -1243,7 +1250,7 @@ async def show_premium_hub(update: Update, context: ContextTypes.DEFAULT_TYPE):
         tier_badge = (
             f"🆓 *FREE TIER*\n"
             f"• Transactions this month: `{monthly_count}/30`\n"
-            f"• AI Credits remaining: `{credits}`"
+            f"• AI Voice Credits remaining: `{credits}`"
         )
 
     msg = (
@@ -1252,7 +1259,7 @@ async def show_premium_hub(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"{tier_badge}\n\n"
         f"*Unlock with Premium:*\n"
         f"✅ Unlimited expense logging\n"
-        f"✅ Unlimited AI receipt scanning\n"
+        f"✅ Unlimited AI receipt scanning (OCR)\n"
         f"✅ Unlimited AI voice logging\n"
         f"✅ Professional PDF reports\n"
         f"✅ Unlimited category limits"
@@ -1261,7 +1268,7 @@ async def show_premium_hub(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("⭐ Premium — 1 Month (150 Stars)", callback_data='buy_premium_1m')],
         [InlineKeyboardButton("⭐ Premium — 3 Months (400 Stars)", callback_data='buy_premium_3m')],
-        [InlineKeyboardButton("📸 AI Credits Pack — 50 credits (50 Stars)", callback_data='buy_credits_50')],
+        [InlineKeyboardButton("🎙️ AI Voice Credits Pack — 50 credits (50 Stars)", callback_data='buy_credits_50')],
         [InlineKeyboardButton("⬅️ Back to Menu", callback_data='back_to_main')]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -1293,8 +1300,8 @@ async def send_invoice_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             "price": 400,
         },
         'buy_credits_50': {
-            "title": "📸 AI Credits Pack — 50 Credits",
-            "description": "50 AI credits for receipt scanning and voice logging.",
+            "title": "🎙️ AI Voice Credits Pack — 50 Credits",
+            "description": "50 AI credits for voice logging transcription.",
             "payload": "credits_50",
             "price": 50,
         },
@@ -1357,8 +1364,8 @@ async def successful_payment_handler(update: Update, context: ContextTypes.DEFAU
     elif payload == "credits_50":
         await db.add_ai_credits(user_id, 50)
         await update.message.reply_text(
-            "✅ *50 AI Credits Added!* 📸\n\n"
-            "You can now scan 50 more receipts or voice notes using AI.",
+            "✅ *50 AI Voice Credits Added!* 🎙️\n\n"
+            "You can now log 50 more voice notes using AI transcription.",
             parse_mode="Markdown"
         )
     else:
